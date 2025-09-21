@@ -91,6 +91,27 @@ const hasH2hDominance = (match: Match, minDiff = 1) => {
   const stats = getH2hStats(match);
   return Math.abs(stats.homeWins - stats.awayWins) >= minDiff;
 };
+const isStrongFavoriteMatch = (match: Match) => {
+  const home = getTeamStanding(match.home_team);
+  const away = getTeamStanding(match.away_team);
+  if (!home || !away) return false;
+
+  const homeRank = toNum(home.rank, 9999);
+  const awayRank = toNum(away.rank, 9999);
+  const homeOdd = toNum(match.home_odds, 0);
+  const awayOdd = toNum(match.away_odds, 0);
+  if (homeOdd <= 2 || awayOdd <= 2) return false;
+
+  const h2h = getH2hStats(match);
+  const homeBetterH2h = h2h.homeWins > h2h.awayWins;
+  const awayBetterH2h = h2h.awayWins > h2h.homeWins;
+
+  // We consider "strong favorite" only if one team is clearly ahead in rank & H2H & odds
+  if (homeBetterH2h && homeRank < awayRank && homeOdd < awayOdd) return true;
+  if (awayBetterH2h && awayRank < homeRank && awayOdd < homeOdd) return true;
+
+  return false;
+};
 
 const getOver25Probability = (match: Match) => {
   const rows = getH2hForMatch(match.id);
@@ -100,6 +121,15 @@ const getOver25Probability = (match: Match) => {
     return ok && (h + a) >= 3;
   }).length;
   return Math.round((overCount / rows.length) * 100);
+};
+const isUnder25Match = (match: Match) => {
+  const rows = getH2hForMatch(match.id);
+  if (!rows.length) return false;
+  // Return true if *all* matches are 0-0, 1-0, 0-1, 1-1, 2-0, or 0-2 (<=2 goals total)
+  return rows.every(r => {
+    const { h, a, ok } = parseScore(r.score);
+    return ok && (h + a) <= 2;
+  });
 };
 
 const fmtDate = (d?: string) => toDate(d)?.toLocaleDateString() ?? (d ?? '');
@@ -118,6 +148,8 @@ const filterRankDiff = ref(0);
 const searchTeam = ref("");
 const filterH2hDominance = ref(false);
 const minOver25Pct = ref(0);
+const filterUnder25 = ref(false);
+const filterStrongFavorite = ref(false);
 
 const chronological = computed(() => [...props.matches].sort(sortByDateTime));
 const allDatesSorted = computed(() =>
@@ -267,6 +299,8 @@ const filteredMatches = computed(() =>
     }
     if (filterH2hDominance.value && !hasH2hDominance(m, 1)) return false;
 if (minOver25Pct.value > 0 && getOver25Probability(m) < minOver25Pct.value) return false;
+if (filterUnder25.value && !isUnder25Match(m)) return false;
+if (filterStrongFavorite.value && !isStrongFavoriteMatch(m)) return false;
 
     return true;
   })
@@ -292,11 +326,20 @@ const resetFilters = () => {
   filterTop5.value = false;
   filterRankDiff.value = 0;
   searchTeam.value = "";
-  minTime.value = '00:00';
-  maxTime.value = '23:59';
+  filterH2hDominance.value = false;
+  filterUnder25.value = false;
+  minOver25Pct.value = 0;
+filterStrongFavorite.value = false;
+
+  minTime.value = "00:00";
+  maxTime.value = "23:59";
   minDate.value = allDatesSorted.value[0] ?? "";
   maxDate.value = allDatesSorted.value[allDatesSorted.value.length - 1] ?? "";
+
+  perPage.value = 100;
+  currentPage.value = 1;
 };
+
 </script>
 
 <template>
@@ -360,6 +403,22 @@ const resetFilters = () => {
       class="accent-purple-500 w-40">
     <span class="text-sm font-bold">{{ minOver25Pct }}%</span>
   </div>
+<!-- Under 2.5 Filter -->
+<button @click="filterUnder25 = !filterUnder25"
+  class="px-3 py-1 rounded-full text-sm border transition"
+  :class="filterUnder25
+    ? 'bg-amber-500 text-white border-amber-500'
+    : 'bg-gray-100 dark:bg-gray-700 border-gray-300 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'">
+  {{ filterUnder25 ? '✓ ' : '' }} Under 2.5 H2H
+</button>
+<!-- Strong Favorite Filter -->
+<button @click="filterStrongFavorite = !filterStrongFavorite"
+  class="px-3 py-1 rounded-full text-sm border transition"
+  :class="filterStrongFavorite
+    ? 'bg-emerald-500 text-white border-emerald-500'
+    : 'bg-gray-100 dark:bg-gray-700 border-gray-300 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'">
+  {{ filterStrongFavorite ? '✓ ' : '' }} Strong Favorite
+</button>
 
   <!-- Search Team -->
   <div class="ml-auto relative">
