@@ -155,15 +155,26 @@ const chronological = computed(() => [...props.matches].sort(sortByDateTime));
 const allDatesSorted = computed(() =>
   chronological.value.map(m => m.match_date).filter(Boolean) as string[]
 );
+const getTodayDate = () => {
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+};
 
-const minDate = ref<string>(allDatesSorted.value[0] ?? '');
-const maxDate = ref<string>(allDatesSorted.value[allDatesSorted.value.length - 1] ?? '');
+const today = getTodayDate();
+const minDate = ref<string>(today);
+const maxDate = ref<string>(today);
+
 const minTime = ref('00:00');
 const maxTime = ref('23:59');
 
 watch([filterTop5, filterRankDiff, searchTeam, minDate, maxDate, minTime, maxTime, perPage, filterH2hDominance, minOver25Pct], () => {
   currentPage.value = 1;
 });
+
+
 
 /* ------------------------- HELPERS ------------------------- */
 const getTeamStanding = (team: string) =>
@@ -230,50 +241,73 @@ const getH2hPercentages = (s: { homeWins: number; awayWins: number; draws: numbe
 const getPrediction = (match: Match) => {
   const home = getTeamStanding(match.home_team);
   const away = getTeamStanding(match.away_team);
-  if (!home || !away) return { winner: "Unknown", confidence: 0 };
+  if (!home || !away)
+    return { outcome: "X", label: "Unknown", confidence: 50 };
 
   let homeScore = 0, awayScore = 0;
+
   const homeRank = toNum(home.rank, 9999);
   const awayRank = toNum(away.rank, 9999);
-  const homePts  = toNum(home.pts, 0);
-  const awayPts  = toNum(away.pts, 0);
+  const homePts = toNum(home.pts, 0);
+  const awayPts = toNum(away.pts, 0);
 
-  // rank + points
+  /* ---------- RANK FACTOR ---------- */
   const rankDiff = awayRank - homeRank;
-  if (rankDiff > 0) homeScore += Math.min(rankDiff, 10) * 2;
-  if (rankDiff < 0) awayScore += Math.min(Math.abs(rankDiff), 10) * 2;
-  const pointDiff = awayPts - homePts;
-  if (pointDiff > 0) awayScore += Math.min(pointDiff, 20) * 1.2;
-  if (pointDiff < 0) homeScore += Math.min(Math.abs(pointDiff), 20) * 1.2;
+  homeScore += Math.max(0, rankDiff) * 2;  // lower rank number → better team
+  awayScore += Math.max(0, -rankDiff) * 2;
 
-  // odds
+  /* ---------- POINTS PER MATCH ---------- */
+  const homePPM = home.mp ? homePts / toNum(home.mp, 1) : homePts;
+  const awayPPM = away.mp ? awayPts / toNum(away.mp, 1) : awayPts;
+  homeScore += homePPM * 3;
+  awayScore += awayPPM * 3;
+
+  /* ---------- RECENT FORM (last 5 games) ---------- */
+  const homeForm = (toNum(home.wins, 0) * 3 + toNum(home.draws, 0)) / (toNum(home.mp, 1) * 3);
+  const awayForm = (toNum(away.wins, 0) * 3 + toNum(away.draws, 0)) / (toNum(away.mp, 1) * 3);
+  homeScore += homeForm * 5;
+  awayScore += awayForm * 5;
+
+  /* ---------- ODDS FACTOR ---------- */
   const homeOdd = toNum(match.home_odds, 0);
   const awayOdd = toNum(match.away_odds, 0);
   if (homeOdd > 0 && awayOdd > 0) {
     const invHome = 1 / homeOdd, invAway = 1 / awayOdd;
-    homeScore += (invHome / (invHome + invAway)) * 10;
-    awayScore += (invAway / (invHome + invAway)) * 10;
+    const total = invHome + invAway;
+    homeScore += (invHome / total) * 10;
+    awayScore += (invAway / total) * 10;
   }
 
-  // h2h
-  getH2hForMatch(match.id).forEach(g => {
+  /* ---------- H2H BONUS ---------- */
+  const h2hMatches = getH2hForMatch(match.id);
+  h2hMatches.forEach(g => {
     const { h, a, ok } = parseScore(g.score);
     if (!ok) return;
     if (g.home_team === match.home_team) {
-      if (h > a) homeScore++; else if (a > h) awayScore++;
+      if (h > a) homeScore += 0.8;
+      else if (a > h) awayScore += 0.8;
     } else if (g.away_team === match.home_team) {
-      if (a > h) homeScore++; else if (h > a) awayScore++;
+      if (a > h) homeScore += 0.8;
+      else if (h > a) awayScore += 0.8;
     }
   });
 
+  /* ---------- FINAL CALCULATION ---------- */
   const total = homeScore + awayScore;
-  if (total <= 0) return { winner: "Balanced", confidence: 50 };
+  if (total <= 0)
+    return { outcome: "X", label: "Balanced", confidence: 50 };
+
   const homePct = Math.round((homeScore / total) * 100);
-  if (Math.abs(homePct - (100 - homePct)) < 10) return { winner: "Draw Likely", confidence: 50 };
-  return homePct > 50
-    ? { winner: match.home_team, confidence: homePct }
-    : { winner: match.away_team, confidence: 100 - homePct };
+  const awayPct = 100 - homePct;
+
+  if (Math.abs(homePct - awayPct) < 10)
+    return { outcome: "X", label: "Draw Likely", confidence: 50 };
+
+  return homePct > awayPct
+    ? { outcome: "1", label: match.home_team, confidence: homePct }
+    : { outcome: "2", label: match.away_team, confidence: awayPct };
 };
+
 
 /* ------------------------- FILTERING & PAGINATION ------------------------- */
 const filteredMatches = computed(() =>
@@ -329,12 +363,12 @@ const resetFilters = () => {
   filterH2hDominance.value = false;
   filterUnder25.value = false;
   minOver25Pct.value = 0;
-filterStrongFavorite.value = false;
+  filterStrongFavorite.value = false;
 
   minTime.value = "00:00";
   maxTime.value = "23:59";
-  minDate.value = allDatesSorted.value[0] ?? "";
-  maxDate.value = allDatesSorted.value[allDatesSorted.value.length - 1] ?? "";
+  minDate.value = getTodayDate();
+  maxDate.value = getTodayDate();
 
   perPage.value = 100;
   currentPage.value = 1;
@@ -453,90 +487,157 @@ filterStrongFavorite.value = false;
       </div>
 
       <!-- MATCH CARDS -->
-      <div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-        <div v-for="match in paginatedMatches" :key="match.id"
-          class="rounded-2xl border bg-white dark:bg-gray-800 p-5 shadow-lg hover:shadow-xl transition flex flex-col gap-4">
-          <div class="flex justify-between text-xs text-gray-400">
-<span>{{ fmtDateTime(match.match_date, match.match_time) }}</span>
-            <span v-if="match.scraped_at">Updated: {{ new Date(match.scraped_at).toLocaleString() }}</span>
-          </div>
-          <div class="flex justify-between text-lg font-semibold">
-            <span>{{ match.home_team }}</span><span class="text-gray-500 text-sm">vs</span><span>{{ match.away_team }}</span>
-          </div>
-          <div class="flex justify-between text-xs font-bold">
-            <span class="bg-green-100 text-green-700 px-2 py-1 rounded-md">Home: {{ match.home_odds ?? '--' }}</span>
-            <span class="bg-gray-200 text-gray-800 px-2 py-1 rounded-md">Draw: {{ match.draw_odds ?? '--' }}</span>
-            <span class="bg-red-100 text-red-700 px-2 py-1 rounded-md">Away: {{ match.away_odds ?? '--' }}</span>
-          </div>
+     <div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+  <div v-for="match in paginatedMatches" :key="match.id"
+       class="group rounded-2xl border border-gray-200/60 dark:border-gray-700/60 bg-white dark:bg-gray-900 p-5 shadow-lg hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 flex flex-col gap-5">
 
-          <!-- Prediction -->
-          <div class="flex flex-col gap-1">
-            <div class="text-center text-sm font-bold py-1 rounded-lg"
-              :class="{
-                'bg-green-100 text-green-700': getPrediction(match).winner === match.home_team,
-                'bg-red-100 text-red-700': getPrediction(match).winner === match.away_team,
-                'bg-gray-200 text-gray-700': ['Draw Likely','Balanced','Unknown'].includes(getPrediction(match).winner)
-              }">
-              🧠 Predicted: {{ getPrediction(match).winner }}
-            </div>
-            <div class="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-              <div class="h-full bg-blue-500" :style="{ width: getPrediction(match).confidence + '%' }"></div>
-            </div>
-  <p class="text-xs text-gray-500 text-center">Confidence: {{ getPrediction(match).confidence }}%</p>
-          </div>
-<!-- NEW: H2H Badge + Over 2.5 Goals -->
-<div class="flex flex-col items-center gap-1">
-  <div v-if="hasH2hDominance(match)" class="text-xs text-purple-600 font-bold">
-    🔥 H2H Dominance
-  </div>
-  <p class="text-xs text-blue-500">
-    Over 2.5 Goals: {{ getOver25Probability(match) }}%
-  </p>
-</div>
-          <!-- Standings -->
-          <div class="grid grid-cols-2 gap-2 text-xs">
-            <div v-if="getTeamStanding(match.home_team)" class="rounded-lg bg-gray-50 dark:bg-gray-700 p-2">
-              <p class="text-[10px] text-gray-500 uppercase">Home</p>
-              <p>Rank: <b>{{ getTeamStanding(match.home_team)?.rank }}</b></p>
-              <p>W: {{ getTeamStanding(match.home_team)?.wins ?? 0 }} / D: {{ getTeamStanding(match.home_team)?.draws ?? 0 }} / L: {{ getTeamStanding(match.home_team)?.losses ?? 0 }}</p>
-              <p class="font-semibold text-green-600">Pts: {{ getTeamStanding(match.home_team)?.pts ?? 0 }}</p>
-            </div>
-            <div v-if="getTeamStanding(match.away_team)" class="rounded-lg bg-gray-50 dark:bg-gray-700 p-2">
-              <p class="text-[10px] text-gray-500 uppercase">Away</p>
-              <p>Rank: <b>{{ getTeamStanding(match.away_team)?.rank }}</b></p>
-              <p>W: {{ getTeamStanding(match.away_team)?.wins ?? 0 }} / D: {{ getTeamStanding(match.away_team)?.draws ?? 0 }} / L: {{ getTeamStanding(match.away_team)?.losses ?? 0 }}</p>
-              <p class="font-semibold text-green-600">Pts: {{ getTeamStanding(match.away_team)?.pts ?? 0 }}</p>
-            </div>
-          </div>
+    <!-- Header: Date & Update -->
+    <div class="flex justify-between text-xs text-gray-500">
+      <span>{{ fmtDateTime(match.match_date, match.match_time) }}</span>
+      <span v-if="match.scraped_at" class="italic">Updated: {{ new Date(match.scraped_at).toLocaleString() }}</span>
+    </div>
 
-          <!-- H2H -->
-          <div v-if="getH2hForMatch(match.id).length" class="text-xs">
-            <h3 class="font-semibold mb-2">H2H ({{ match.home_team }} vs {{ match.away_team }})</h3>
-            <div class="flex flex-wrap gap-4 mb-2">
-              <span><span class="inline-block w-3 h-3 bg-green-500 rounded"></span> {{ match.home_team }} Wins: <b>{{ getH2hStats(match).homeWins }}</b></span>
-              <span><span class="inline-block w-3 h-3 bg-gray-400 rounded"></span> Draws: <b>{{ getH2hStats(match).draws }}</b></span>
-              <span><span class="inline-block w-3 h-3 bg-red-500 rounded"></span> {{ match.away_team }} Wins: <b>{{ getH2hStats(match).awayWins }}</b></span>
-              <span>Total: <b>{{ getH2hStats(match).total }}</b></span>
-            </div>
-            <div class="flex h-3 rounded overflow-hidden">
-              <div class="bg-green-500" :style="{ width: getH2hPercentages(getH2hStats(match)).pHome + '%' }"></div>
-              <div class="bg-gray-400" :style="{ width: getH2hPercentages(getH2hStats(match)).pDraw + '%' }"></div>
-              <div class="bg-red-500" :style="{ width: getH2hPercentages(getH2hStats(match)).pAway + '%' }"></div>
-            </div>
-            <ul class="mt-3 space-y-1">
-              <li v-for="h2h in getH2hForMatch(match.id).slice(0, 5)" :key="h2h.id" class="flex justify-between text-gray-500">
-                <span>{{ h2h.date }} {{ h2h.home_team }} vs {{ h2h.away_team }}</span><b>{{ h2h.score }}</b>
-              </li>
-            </ul>
-          </div>
+    <!-- Teams -->
+    <div class="flex items-center justify-between text-lg font-semibold">
+      <span class="truncate">{{ match.home_team }}</span>
+      <span class="text-gray-400 text-sm">vs</span>
+      <span class="truncate">{{ match.away_team }}</span>
+    </div>
 
-          <!-- Footer -->
-          <div class="flex justify-between text-[11px] text-gray-400 border-t pt-2">
-            <a :href="match.match_url" target="_blank" class="text-blue-500 hover:underline">View</a>
-            <span v-if="match.match_key" class="truncate max-w-[60%]">{{ match.match_key }}</span>
-          </div>
-        </div>
+    <!-- Prediction Outcome -->
+    <div class="flex flex-col items-center">
+      <span class="text-sm font-bold px-3 py-1 rounded-full shadow-sm"
+            :class="{
+              'bg-green-100 text-green-700': getPrediction(match).outcome === '1',
+              'bg-gray-200 text-gray-700': getPrediction(match).outcome === 'X',
+              'bg-red-100 text-red-700': getPrediction(match).outcome === '2'
+            }">
+        🧠 Prediction: {{ getPrediction(match).outcome }} ({{ getPrediction(match).label }})
+      </span>
+      <div class="w-full h-2 bg-gray-200 rounded-full overflow-hidden mt-2">
+        <div class="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all"
+             :style="{ width: getPrediction(match).confidence + '%' }"></div>
       </div>
+      <p class="text-xs text-gray-500 mt-1">Confidence: {{ getPrediction(match).confidence }}%</p>
+    </div>
+
+    <!-- Odds -->
+    <div class="flex justify-between text-xs font-semibold">
+      <span class="px-2 py-1 rounded-md bg-green-100 text-green-700">Home: {{ match.home_odds ?? '--' }}</span>
+      <span class="px-2 py-1 rounded-md bg-gray-200 text-gray-800">Draw: {{ match.draw_odds ?? '--' }}</span>
+      <span class="px-2 py-1 rounded-md bg-red-100 text-red-700">Away: {{ match.away_odds ?? '--' }}</span>
+    </div>
+
+    <!-- Quick Insights -->
+    <div class="flex flex-col items-center gap-1">
+      <span v-if="hasH2hDominance(match)" class="text-xs font-bold text-purple-600">🔥 H2H Dominance</span>
+      <span class="text-xs text-blue-500">Over 2.5 Goals: {{ getOver25Probability(match) }}%</span>
+    </div>
+
+    <!-- Standings -->
+<div class="grid grid-cols-2 gap-2 text-xs">
+  <!-- HOME -->
+  <div v-if="getTeamStanding(match.home_team)"
+       class="rounded-xl bg-gray-50 dark:bg-gray-800 p-3 shadow-sm flex flex-col gap-1">
+    <p class="text-[10px] text-gray-400 uppercase">Home</p>
+    <p>Rank: <b>{{ getTeamStanding(match.home_team)?.rank }}</b></p>
+    <p>MP: <b>{{ getTeamStanding(match.home_team)?.mp ?? 0 }}</b></p>
+    <p>
+      W: {{ getTeamStanding(match.home_team)?.wins ?? 0 }} /
+      D: {{ getTeamStanding(match.home_team)?.draws ?? 0 }} /
+      L: {{ getTeamStanding(match.home_team)?.losses ?? 0 }}
+    </p>
+    <p>GF/GA: <b>{{ getTeamStanding(match.home_team)?.goals ?? '-' }}</b></p>
+    <p :class="{
+      'text-green-600 font-bold': toNum(getTeamStanding(match.home_team)?.gd, 0) > 0,
+      'text-red-600 font-bold': toNum(getTeamStanding(match.home_team)?.gd, 0) < 0,
+      'text-gray-600 font-medium': toNum(getTeamStanding(match.home_team)?.gd, 0) === 0
+    }">
+      GD: {{ getTeamStanding(match.home_team)?.gd ?? 0 }}
+    </p>
+    <p class="font-semibold text-green-600">
+      Pts: {{ getTeamStanding(match.home_team)?.pts ?? 0 }}
+    </p>
+  </div>
+
+  <!-- AWAY -->
+  <div v-if="getTeamStanding(match.away_team)"
+       class="rounded-xl bg-gray-50 dark:bg-gray-800 p-3 shadow-sm flex flex-col gap-1">
+    <p class="text-[10px] text-gray-400 uppercase">Away</p>
+    <p>Rank: <b>{{ getTeamStanding(match.away_team)?.rank }}</b></p>
+    <p>MP: <b>{{ getTeamStanding(match.away_team)?.mp ?? 0 }}</b></p>
+    <p>
+      W: {{ getTeamStanding(match.away_team)?.wins ?? 0 }} /
+      D: {{ getTeamStanding(match.away_team)?.draws ?? 0 }} /
+      L: {{ getTeamStanding(match.away_team)?.losses ?? 0 }}
+    </p>
+    <p>GF/GA: <b>{{ getTeamStanding(match.away_team)?.goals ?? '-' }}</b></p>
+    <p :class="{
+      'text-green-600 font-bold': toNum(getTeamStanding(match.away_team)?.gd, 0) > 0,
+      'text-red-600 font-bold': toNum(getTeamStanding(match.away_team)?.gd, 0) < 0,
+      'text-gray-600 font-medium': toNum(getTeamStanding(match.away_team)?.gd, 0) === 0
+    }">
+      GD: {{ getTeamStanding(match.away_team)?.gd ?? 0 }}
+    </p>
+    <p class="font-semibold text-green-600">
+      Pts: {{ getTeamStanding(match.away_team)?.pts ?? 0 }}
+    </p>
+  </div>
+</div>
+
+
+    <!-- H2H Section -->
+   <div v-if="getH2hForMatch(match.id).length" class="mt-2">
+  <details class="group" open>
+    <summary class="flex justify-between items-center cursor-default text-xs text-gray-500">
+      <span>⚔️ H2H Stats</span>
+      <!-- Remove rotation effect since it's always open -->
+      <span class="text-gray-400">▼</span>
+    </summary>
+    <div class="mt-2">
+      <div class="flex gap-4 mb-2 text-xs">
+        <span class="flex items-center gap-1">
+          <span class="inline-block w-3 h-3 bg-green-500 rounded"></span>
+          {{ match.home_team }} Wins: <b>{{ getH2hStats(match).homeWins }}</b>
+        </span>
+        <span class="flex items-center gap-1">
+          <span class="inline-block w-3 h-3 bg-gray-400 rounded"></span>
+          Draws: <b>{{ getH2hStats(match).draws }}</b>
+        </span>
+        <span class="flex items-center gap-1">
+          <span class="inline-block w-3 h-3 bg-red-500 rounded"></span>
+          {{ match.away_team }} Wins: <b>{{ getH2hStats(match).awayWins }}</b>
+        </span>
+      </div>
+
+      <!-- H2H Bar -->
+      <div class="flex h-3 rounded-full overflow-hidden">
+        <div class="bg-green-500" :style="{ width: getH2hPercentages(getH2hStats(match)).pHome + '%' }"></div>
+        <div class="bg-gray-400" :style="{ width: getH2hPercentages(getH2hStats(match)).pDraw + '%' }"></div>
+        <div class="bg-red-500" :style="{ width: getH2hPercentages(getH2hStats(match)).pAway + '%' }"></div>
+      </div>
+
+      <!-- Last Matches -->
+      <ul class="mt-3 space-y-1">
+        <li v-for="h2h in getH2hForMatch(match.id).slice(0, 5)" :key="h2h.id"
+            class="flex justify-between text-gray-500 text-xs bg-gray-50 dark:bg-gray-800 p-2 rounded-lg">
+          <span>{{ h2h.date }} • {{ h2h.home_team }} vs {{ h2h.away_team }}</span>
+          <b>{{ h2h.score }}</b>
+        </li>
+      </ul>
+    </div>
+  </details>
+</div>
+
+
+    <!-- Footer -->
+    <div class="flex justify-between text-[11px] text-gray-400 border-t pt-2">
+      <a :href="match.match_url" target="_blank" class="text-blue-500 hover:underline">View Details</a>
+      <span v-if="match.match_key" class="truncate max-w-[60%]">{{ match.match_key }}</span>
+    </div>
+  </div>
+</div>
+
 
       <!-- Pagination -->
       <div class="flex justify-center mt-6 gap-2">
